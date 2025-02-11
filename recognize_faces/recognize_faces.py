@@ -1,19 +1,17 @@
 import cv2
 import numpy as np
 import os
-from mtcnn import MTCNN
-from keras_facenet import FaceNet
+from mtcnn import MTCNN # Multi-task Cascaded Convolutional Networks
+from keras_facenet import FaceNet # modelo de aprendizado one-shot para reconhecimento facial
+from concurrent.futures import ThreadPoolExecutor # Para processamento paralelo
 
 # Inicializa a detecção e reconhecimento facial
-detector = MTCNN()
+detector = MTCNN() 
 embedder = FaceNet()
 
 # Diretório onde as imagens serão salvas
 IMG_DIR = "img"
 os.makedirs(IMG_DIR, exist_ok=True)
-
-# Margem base de pixels ao redor do rosto
-BASE_MARGIN = 30
 
 def save_face(name, face_img):
     """Salva a imagem do rosto em um arquivo .jpg"""
@@ -49,17 +47,6 @@ def adjust_box_with_dynamic_margin(box, frame_shape):
     h = min(h + 2 * dynamic_margin, frame_shape[0] - y)
     return x, y, w, h
 
-def enhance_lighting(img):
-    """Aprimora a iluminação da imagem usando equalização de histograma."""
-    img_yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
-    img_yuv[:, :, 0] = cv2.equalizeHist(img_yuv[:, :, 0])  # Equaliza apenas o canal de luminância
-    return cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
-
-def process_frame(frame):
-    """Redimensiona o frame e melhora a iluminação para aumentar a área de captura."""
-    frame = cv2.resize(frame, (0, 0), fx=1.2, fy=1.2)
-    return enhance_lighting(frame)
-
 def capture_face():
     """Captura e salva rostos detectados."""
     cap = cv2.VideoCapture(0)
@@ -71,37 +58,68 @@ def capture_face():
     while True:
         ret, frame = cap.read()
         if not ret:
+            print("Erro ao capturar o frame.")
             break
-        
-        frame = process_frame(frame)
-        faces = detector.detect_faces(frame)
-        
-        if faces:
-            for face in faces:
-                x, y, w, h = adjust_box_with_dynamic_margin(face['box'], frame.shape)
                 
-                # Desenha o retângulo ao redor do rosto
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            
-            cv2.imshow("Capture Face", frame)
+        img_blur = cv2.GaussianBlur(frame, (9,9), 0) # Evitar falsos positivos e outliers
+        cv2.imshow("Capture Face", img_blur)
         
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('r') and faces:
-            name = input("Digite o nome da pessoa: ")
-            x, y, w, h = adjust_box_with_dynamic_margin(faces[0]['box'], frame.shape)
-            face_area = frame[y:y+h, x:x+w]
-            save_face(name, face_area)
-            
+        if key == ord('r') :
+            exits_faces = False
+            img_blur = cv2.blur(frame, (9,9), 0)
+            faces = detector.detect_faces(img_blur)
+
+            maior_rosto = None
+            maior_area = 0
+        
+            if faces:
+                exits_faces = True
+                for face in faces:
+                    x, y, w, h = face['box']
+                    area = w * h
+
+                    if area > maior_area:
+                        maior_area = area
+                        maior_rosto = face
+                    
+
+            else:
+                print("Nenhum rosto detectado.")
+                exits_faces = False
+
+            if exits_faces:
+                # Desenha o retângulo ao redor do rosto
+                x, y, w, h = adjust_box_with_dynamic_margin(maior_rosto['box'], frame.shape)
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                name = input("Digite o nome da pessoa: ")
+                x, y, w, h = adjust_box_with_dynamic_margin(maior_rosto['box'], frame.shape)
+                face_area = frame[y:y+h, x:x+w]
+                save_face(name, face_area)
+
         if key == ord('q'):
             break
     
     cap.release()
     cv2.destroyAllWindows()
 
+def detection(faces, frame, known_faces):
+    for face in faces:
+        x, y, w, h = adjust_box_with_dynamic_margin(face['box'], frame.shape)
+        face_img = preprocess_image(frame[y:y+h, x:x+w], (160, 160))
+        embedding = embedder.embeddings(face_img)[0]
+
+        best_match, min_dist = find_best_match(embedding, known_faces)
+        label = best_match if min_dist < 0.9 else "Desconhecido"
+        
+        # Desenha o retângulo e o nome
+        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        cv2.putText(frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        cv2.imshow("Recognize Faces", frame)
+
 def recognize_faces():
     """Reconhece rostos em tempo real comparando com rostos salvos."""
     cap = cv2.VideoCapture(0)
-    
     # Ajuste a resolução da webcam para melhorar o desempenho
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # Largura da imagem
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)  # Altura da imagem
@@ -113,23 +131,12 @@ def recognize_faces():
         if not ret:
             break
         
-        frame = process_frame(frame)
         faces = detector.detect_faces(frame)
         
         if faces:
-            for face in faces:
-                x, y, w, h = adjust_box_with_dynamic_margin(face['box'], frame.shape)
-                face_img = preprocess_image(frame[y:y+h, x:x+w], (160, 160))
-                embedding = embedder.embeddings(face_img)[0]
-
-                best_match, min_dist = find_best_match(embedding, known_faces)
-                label = best_match if min_dist < 0.9 else "Desconhecido"
-                
-                # Desenha o retângulo e o nome
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                cv2.putText(frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
-            cv2.imshow("Recognize Faces", frame)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(detection, [faces], [frame], [known_faces]))
+        cv2.imshow("Recognize Faces", frame)    
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
